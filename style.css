@@ -304,3 +304,38 @@ footer{text-align:center;color:#777;padding:18px;font-size:12px}
   .room{flex-wrap:wrap}
   .room #who{margin-right:0}
 }
+/* لوحة إدارة الرتب الخاصة بالمالك */
+.ownerPanel {
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid #806124;
+  border-radius: 12px;
+  background: #17140f;
+}
+
+.ownerPanel h3 {
+  color: #e6c36a;
+  margin: 0 0 10px;
+}
+
+.ownerPanel label {
+  display: block;
+  color: #d9bd73;
+  font-size: 13px;
+  margin-top: 9px;
+}
+
+.ownerPanel select {
+  width: 100%;
+  padding: 12px;
+  margin: 6px 0;
+  border: 1px solid #51452e;
+  border-radius: 9px;
+  background: #101010;
+  color: white;
+}
+
+.ownerPanel button {
+  width: 100%;
+  margin-top: 8px;
+}
