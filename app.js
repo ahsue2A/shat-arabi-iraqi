@@ -1,4 +1,3 @@
-
 import {initializeApp} from "https://www.gstatic.com/firebasejs/11.6.0/firebase-app.js";
 
 import {
@@ -35,6 +34,9 @@ let nick="";
 let stopMessages=null;
 let stopRooms=null;
 let stopUsers=null;
+let stopOwnerUsers=null;
+let stopMyRole=null;
+
 let currentRoom="general";
 let roomName="الغرفة العامة";
 let heartbeat=null;
@@ -44,12 +46,15 @@ let myRole="member";
 let viewedUserId=null;
 let blockedFromGeneral=false;
 
+let ownerUsersCache=[];
+
 const placeholder="data:image/svg+xml,"+encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" fill="#29251e"/><circle cx="50" cy="36" r="19" fill="#c49b3b"/><path d="M12 100c2-27 17-40 38-40s36 13 38 40" fill="#c49b3b"/></svg>'
 );
 
 function msg(id,t){
-  $(id).textContent=t||"";
+  const el=$(id);
+  if(el)el.textContent=t||"";
 }
 
 function isOwnerId(uid){
@@ -106,7 +111,25 @@ function roleName(role){
   return "عضو";
 }
 
-// قراءة رتبة المستخدم والتحقق من انتهائها
+// إضافة أشهر تقويمية مع معالجة نهاية الشهر
+function addCalendarMonths(date,months){
+  const d=new Date(date);
+  const day=d.getDate();
+
+  d.setDate(1);
+  d.setMonth(d.getMonth()+months);
+
+  const lastDay=new Date(
+    d.getFullYear(),
+    d.getMonth()+1,
+    0
+  ).getDate();
+
+  d.setDate(Math.min(day,lastDay));
+  return d;
+}
+
+// تحميل رتبة المستخدم
 async function loadMyRole(u){
   isOwner=isOwnerId(u.uid);
   myRole="member";
@@ -126,6 +149,60 @@ async function loadMyRole(u){
   ){
     myRole=data.role;
   }
+}
+
+// متابعة الرتبة مباشرة عند تغييرها
+function watchMyRole(u){
+  if(stopMyRole)stopMyRole();
+  if(isOwner)return;
+
+  stopMyRole=onSnapshot(doc(db,"roles",u.uid),snap=>{
+    let newRole="member";
+
+    if(snap.exists()){
+      const data=snap.data();
+
+      if(
+        data.expiresAt?.toDate &&
+        data.expiresAt.toDate().getTime()>Date.now() &&
+        ["admin","moderator"].includes(data.role)
+      ){
+        newRole=data.role;
+      }
+    }
+
+    myRole=newRole;
+    updateWho();
+
+  },e=>{
+    console.error("Role listener:",e);
+  });
+}
+
+function updateWho(){
+  const u=auth.currentUser;
+  if(!u)return;
+
+  if(isOwner){
+    $("who").textContent="👑 OWNER | "+(nick||u.displayName||"AHMED");
+    $("who").style.color="#D4AF37";
+    $("who").style.fontWeight="bold";
+  }else if(myRole==="admin"){
+    $("who").textContent="🛡️ ADMIN | "+(nick||u.displayName||"");
+    $("who").style.color="#e6c36a";
+    $("who").style.fontWeight="bold";
+  }else if(myRole==="moderator"){
+    $("who").textContent="🔰 MODERATOR | "+(nick||u.displayName||"");
+    $("who").style.color="#8fc7e8";
+    $("who").style.fontWeight="bold";
+  }else{
+    $("who").textContent=nick||u.displayName||"زائر";
+    $("who").style.color="";
+    $("who").style.fontWeight="";
+  }
+
+  const panel=$("ownerPanel");
+  if(panel)panel.classList.toggle("hidden",!isOwner);
 }
 
 // التحقق من الحظر الكامل
@@ -237,6 +314,230 @@ function renderName(element,uid,name,role="member"){
   }
 }
 
+// معلومات الرتبة في لوحة المالك
+async function showRoleInfo(){
+  const target=$("roleTarget");
+  if(!target)return;
+
+  const uid=target.value;
+
+  if(!uid){
+    msg("ownerRoleInfo","اختر عضواً لعرض رتبته.");
+    return;
+  }
+
+  try{
+    const snap=await getDoc(doc(db,"roles",uid));
+
+    if(!snap.exists()){
+      msg("ownerRoleInfo","الرتبة الحالية: عضو عادي.");
+      return;
+    }
+
+    const data=snap.data();
+
+    if(
+      !["admin","moderator"].includes(data.role) ||
+      !data.expiresAt?.toDate ||
+      data.expiresAt.toDate().getTime()<=Date.now()
+    ){
+      msg("ownerRoleInfo","الرتبة الحالية: عضو عادي.");
+      return;
+    }
+
+    const expiry=data.expiresAt.toDate().toLocaleString("ar-IQ");
+
+    msg(
+      "ownerRoleInfo",
+      "الرتبة الحالية: "+roleName(data.role)+" — تنتهي: "+expiry
+    );
+
+  }catch(e){
+    msg("ownerRoleInfo","تعذر قراءة الرتبة: "+err(e));
+  }
+}
+
+// متابعة قائمة الأعضاء في لوحة المالك
+function watchOwnerUsers(){
+  if(stopOwnerUsers)stopOwnerUsers();
+
+  if(!isOwner)return;
+
+  stopOwnerUsers=onSnapshot(collection(db,"users"),s=>{
+    const select=$("roleTarget");
+    if(!select)return;
+
+    const oldValue=select.value;
+
+    select.replaceChildren();
+
+    const first=document.createElement("option");
+    first.value="";
+    first.textContent="اختر العضو";
+    select.append(first);
+
+    ownerUsersCache=[];
+
+    s.forEach(d=>{
+      if(d.id===OWNER_UID)return;
+
+      const data=d.data();
+
+      ownerUsersCache.push({
+        uid:d.id,
+        name:data.name||"مستخدم"
+      });
+    });
+
+    ownerUsersCache.sort((a,b)=>
+      a.name.localeCompare(b.name,"ar")
+    );
+
+    ownerUsersCache.forEach(user=>{
+      const option=document.createElement("option");
+      option.value=user.uid;
+      option.textContent=user.name;
+      select.append(option);
+    });
+
+    if(ownerUsersCache.some(x=>x.uid===oldValue)){
+      select.value=oldValue;
+    }
+
+    showRoleInfo();
+
+  },e=>{
+    msg("ownerRoleMsg","تعذر تحميل الأعضاء: "+err(e));
+  });
+}
+
+// تهيئة لوحة المالك
+function setupOwnerPanel(){
+  const panel=$("ownerPanel");
+  if(!panel)return;
+
+  panel.classList.toggle("hidden",!isOwner);
+
+  if(!isOwner){
+    if(stopOwnerUsers)stopOwnerUsers();
+    stopOwnerUsers=null;
+    return;
+  }
+
+  watchOwnerUsers();
+
+  $("roleTarget").onchange=showRoleInfo;
+
+  $("assignRole").onclick=assignMemberRole;
+  $("revokeRole").onclick=revokeMemberRole;
+}
+
+// تعيين رتبة
+async function assignMemberRole(){
+  const u=auth.currentUser;
+
+  if(!u||!isOwner){
+    msg("ownerRoleMsg","هذه الخاصية للمالك فقط.");
+    return;
+  }
+
+  const uid=$("roleTarget").value;
+  const role=$("roleType").value;
+  const months=Number($("roleDuration").value);
+
+  if(!uid){
+    msg("ownerRoleMsg","اختر العضو أولاً.");
+    return;
+  }
+
+  if(uid===OWNER_UID){
+    msg("ownerRoleMsg","لا يمكن تغيير رتبة المالك.");
+    return;
+  }
+
+  if(!["admin","moderator"].includes(role)){
+    msg("ownerRoleMsg","الرتبة المختارة غير صحيحة.");
+    return;
+  }
+
+  if(![1,3,12].includes(months)){
+    msg("ownerRoleMsg","اختر مدة صحيحة.");
+    return;
+  }
+
+  const selected=ownerUsersCache.find(x=>x.uid===uid);
+
+  if(!selected){
+    msg("ownerRoleMsg","لم يتم العثور على العضو.");
+    return;
+  }
+
+  const button=$("assignRole");
+  button.disabled=true;
+  msg("ownerRoleMsg","جارٍ تعيين الرتبة...");
+
+  try{
+    const expiry=addCalendarMonths(new Date(),months);
+
+    await setDoc(doc(db,"roles",uid),{
+      role,
+      name:selected.name,
+      expiresAt:Timestamp.fromDate(expiry),
+      assignedAt:serverTimestamp(),
+      assignedBy:u.uid
+    });
+
+    msg(
+      "ownerRoleMsg",
+      "تم تعيين "+roleName(role)+" للعضو بنجاح ✓"
+    );
+
+    await showRoleInfo();
+
+  }catch(e){
+    msg("ownerRoleMsg","تعذر تعيين الرتبة: "+err(e));
+  }finally{
+    button.disabled=false;
+  }
+}
+
+// سحب الرتبة
+async function revokeMemberRole(){
+  if(!isOwner){
+    msg("ownerRoleMsg","سحب الرتب للمالك فقط.");
+    return;
+  }
+
+  const uid=$("roleTarget").value;
+
+  if(!uid){
+    msg("ownerRoleMsg","اختر العضو أولاً.");
+    return;
+  }
+
+  if(uid===OWNER_UID){
+    msg("ownerRoleMsg","لا يمكن سحب رتبة المالك.");
+    return;
+  }
+
+  const button=$("revokeRole");
+  button.disabled=true;
+  msg("ownerRoleMsg","جارٍ سحب الرتبة...");
+
+  try{
+    await deleteDoc(doc(db,"roles",uid));
+
+    msg("ownerRoleMsg","تم سحب الرتبة وإرجاع العضو إلى عضو عادي ✓");
+
+    await showRoleInfo();
+
+  }catch(e){
+    msg("ownerRoleMsg","تعذر سحب الرتبة: "+err(e));
+  }finally{
+    button.disabled=false;
+  }
+}
+
 // عرض الملف الشخصي
 async function openProfile(uid){
   try{
@@ -262,7 +563,8 @@ async function openProfile(uid){
 
         if(
           rd.expiresAt?.toDate &&
-          rd.expiresAt.toDate().getTime()>Date.now()
+          rd.expiresAt.toDate().getTime()>Date.now() &&
+          ["admin","moderator"].includes(rd.role)
         ){
           targetRole=rd.role;
         }
@@ -316,26 +618,26 @@ function updateModerationOptions(){
   const duration=$("moderationDuration");
 
   const options=[
-    ["mute","كتم في العامة",true],
-    ["generalBlock","منع من العامة",true],
-    ["unmute","رفع الكتم",true],
-    ["unblockGeneral","رفع منع العامة",true]
+    ["mute","كتم في العامة"],
+    ["generalBlock","منع من العامة"],
+    ["unmute","رفع الكتم"],
+    ["unblockGeneral","رفع منع العامة"]
   ];
 
   if(currentRoom!=="general"){
-    options.push(["roomKick","طرد من الغرفة الخاصة",true]);
+    options.push(["roomKick","طرد من الغرفة الخاصة"]);
   }
 
   if(canFullBan()){
-    options.push(["fullBan","حظر كامل مؤقت",true]);
+    options.push(["fullBan","حظر كامل مؤقت"]);
   }
 
   if(isOwner){
-    options.push(["permanentBan","حظر كامل دائم",true]);
+    options.push(["permanentBan","حظر كامل دائم"]);
   }
 
   if(canFullBan()){
-    options.push(["unban","رفع الحظر الكامل",true]);
+    options.push(["unban","رفع الحظر الكامل"]);
   }
 
   select.replaceChildren();
@@ -350,8 +652,7 @@ function updateModerationOptions(){
   duration.disabled=false;
 
   select.onchange=()=>{
-    const permanent=select.value==="permanentBan";
-    duration.disabled=permanent;
+    duration.disabled=select.value==="permanentBan";
   };
 
   select.dispatchEvent(new Event("change"));
@@ -418,7 +719,7 @@ $("saveProfile").onclick=async()=>{
 // تنفيذ أوامر الإدارة
 $("applyModeration").onclick=async()=>{
   const u=auth.currentUser;
-  const target= viewedUserId;
+  const target=viewedUserId;
 
   if(!u||!target)return;
 
@@ -484,6 +785,10 @@ $("applyModeration").onclick=async()=>{
 
       if(!members.includes(target)){
         throw Error("العضو ليس في هذه الغرفة");
+      }
+
+      if(roomSnap.data().ownerId===target){
+        throw Error("لا يمكن طرد مالك الغرفة");
       }
 
       await updateDoc(roomRef,{
@@ -810,7 +1115,7 @@ async function createRoom(){
   }
 }
 
-// الانضمام إلى غرفة خاصة
+// الانضمام إلى غرفة خاصة مع معالجة مشكلة قراءة الغرفة
 async function joinRoom(){
   const u=auth.currentUser;
   const code=$("inviteCode").value.trim().toLowerCase();
@@ -828,21 +1133,28 @@ async function joinRoom(){
     }
 
     const data=invite.data();
-
     const roomRef=doc(db,"rooms",data.roomId);
-    const roomSnap=await getDoc(roomRef);
 
-    if(!roomSnap.exists()){
-      throw Error("الغرفة غير موجودة");
+    // العضو الموجود مسبقاً يستطيع قراءة الغرفة.
+    // العضو الجديد لا يستطيع قراءتها قبل الانضمام.
+    let alreadyMember=false;
+
+    try{
+      const existingRoom=await getDoc(roomRef);
+
+      if(existingRoom.exists()){
+        const members=existingRoom.data().members||[];
+        alreadyMember=members.includes(u.uid);
+      }else{
+        throw Error("الغرفة غير موجودة");
+      }
+    }catch(readError){
+      if(readError.code!=="permission-denied"){
+        throw readError;
+      }
     }
 
-    const room=roomSnap.data();
-
-    if(!isOwner&&room.inviteCode!==code){
-      throw Error("رمز الدعوة غير صالح لهذه الغرفة");
-    }
-
-    if(!isOwner&&!room.members.includes(u.uid)){
+    if(!isOwner&&!alreadyMember){
       await updateDoc(roomRef,{
         members:arrayUnion(u.uid)
       });
@@ -1008,11 +1320,24 @@ onAuthStateChanged(auth,async u=>{
     isOwner=false;
     myRole="member";
     blockedFromGeneral=false;
+    ownerUsersCache=[];
 
     if(stopMessages)stopMessages();
     if(stopRooms)stopRooms();
     if(stopUsers)stopUsers();
+    if(stopOwnerUsers)stopOwnerUsers();
+    if(stopMyRole)stopMyRole();
+
+    stopMessages=null;
+    stopRooms=null;
+    stopUsers=null;
+    stopOwnerUsers=null;
+    stopMyRole=null;
+
     if(heartbeat)clearInterval(heartbeat);
+
+    const panel=$("ownerPanel");
+    if(panel)panel.classList.add("hidden");
 
     $("chat").classList.add("hidden");
     $("auth").classList.remove("hidden");
@@ -1041,23 +1366,9 @@ onAuthStateChanged(auth,async u=>{
     $("auth").classList.add("hidden");
     $("chat").classList.remove("hidden");
 
-    if(isOwner){
-      $("who").textContent="👑 OWNER | "+(nick||u.displayName||"AHMED");
-      $("who").style.color="#D4AF37";
-      $("who").style.fontWeight="bold";
-    }else if(myRole==="admin"){
-      $("who").textContent="🛡️ ADMIN | "+(nick||u.displayName||"");
-      $("who").style.color="#e6c36a";
-      $("who").style.fontWeight="bold";
-    }else if(myRole==="moderator"){
-      $("who").textContent="🔰 MODERATOR | "+(nick||u.displayName||"");
-      $("who").style.color="#8fc7e8";
-      $("who").style.fontWeight="bold";
-    }else{
-      $("who").textContent=nick||u.displayName||"زائر";
-      $("who").style.color="";
-      $("who").style.fontWeight="";
-    }
+    updateWho();
+    setupOwnerPanel();
+    watchMyRole(u);
 
     setPresence();
 
