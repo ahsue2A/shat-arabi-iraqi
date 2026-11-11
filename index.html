@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
@@ -57,6 +58,36 @@
 
       <h3>المتصلون <span id="onlineCount">0</span></h3>
       <div id="onlineList"></div>
+
+      <!-- لوحة إدارة المالك -->
+      <div id="ownerPanel" class="ownerPanel hidden">
+        <h3>👑 لوحة إدارة المالك</h3>
+
+        <label for="roleTarget">اختر العضو</label>
+        <select id="roleTarget">
+          <option value="">اختر العضو</option>
+        </select>
+
+        <p id="ownerRoleInfo">اختر عضواً لعرض رتبته.</p>
+
+        <label for="roleType">الرتبة الجديدة</label>
+        <select id="roleType">
+          <option value="admin">🛡️ ADMIN - أدمن</option>
+          <option value="moderator">🔰 MODERATOR - مشرف</option>
+        </select>
+
+        <label for="roleDuration">مدة الصلاحية</label>
+        <select id="roleDuration">
+          <option value="1">شهر واحد</option>
+          <option value="3">3 أشهر</option>
+          <option value="12">سنة كاملة</option>
+        </select>
+
+        <button id="assignRole">تعيين الرتبة</button>
+        <button id="revokeRole" class="alt">سحب الرتبة</button>
+
+        <p id="ownerRoleMsg" class="status"></p>
+      </div>
     </aside>
 
     <div class="chatPane">
