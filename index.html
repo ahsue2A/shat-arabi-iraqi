@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
@@ -87,8 +86,42 @@
       <p id="viewStatus">لا توجد حالة حالياً</p>
     </div>
 
+    <!-- لوحة الإدارة -->
+    <div id="moderationPanel" class="moderationPanel hidden">
+      <h3>🛡️ إدارة العضو</h3>
+
+      <label for="moderationAction">نوع الإجراء</label>
+      <select id="moderationAction">
+        <option value="mute">كتم في العامة</option>
+        <option value="generalBlock">منع من العامة</option>
+        <option value="roomKick">طرد من الغرفة الخاصة</option>
+        <option value="fullBan">حظر كامل مؤقت</option>
+        <option value="permanentBan">حظر كامل دائم</option>
+        <option value="unmute">رفع الكتم</option>
+        <option value="unblockGeneral">رفع منع العامة</option>
+        <option value="unban">رفع الحظر الكامل</option>
+      </select>
+
+      <label for="moderationDuration">المدة</label>
+      <select id="moderationDuration">
+        <option value="10">10 دقائق</option>
+        <option value="60">ساعة واحدة</option>
+        <option value="4320">3 أيام</option>
+        <option value="10080">أسبوع واحد</option>
+      </select>
+
+      <label for="moderationReason">سبب الإجراء (اختياري)</label>
+      <input id="moderationReason" maxlength="200"
+             placeholder="اكتب سبب الإجراء">
+
+      <button id="applyModeration">تنفيذ الإجراء</button>
+      <p id="moderationMsg" class="status"></p>
+    </div>
+
+    <!-- تعديل الملف الشخصي -->
     <div id="editProfile" class="editProfile hidden">
       <h3>تعديل ملفي الشخصي</h3>
+
       <label>رابط الصورة الشخصية</label>
       <input id="avatarURL" type="url" placeholder="https://example.com/photo.jpg">
 
