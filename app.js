@@ -2,29 +2,13 @@
 import {initializeApp} from "https://www.gstatic.com/firebasejs/11.6.0/firebase-app.js";
 
 import {
-  getAuth,
-  onAuthStateChanged,
-  createUserWithEmailAndPassword,
-  signInWithEmailAndPassword,
-  signInAnonymously,
-  signOut,
-  updateProfile
+  getAuth,onAuthStateChanged,createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,signInAnonymously,signOut,updateProfile
 } from "https://www.gstatic.com/firebasejs/11.6.0/firebase-auth.js";
 
 import {
-  initializeFirestore,
-  collection,
-  addDoc,
-  query,
-  where,
-  orderBy,
-  onSnapshot,
-  serverTimestamp,
-  doc,
-  setDoc,
-  getDoc,
-  updateDoc,
-  arrayUnion
+  initializeFirestore,collection,addDoc,query,where,orderBy,
+  onSnapshot,serverTimestamp,doc,setDoc,getDoc,updateDoc,arrayUnion
 } from "https://www.gstatic.com/firebasejs/11.6.0/firebase-firestore.js";
 
 const firebaseConfig={
@@ -40,9 +24,7 @@ const OWNER_UID="dvdFivbIZ9P7gsDZmFx0RLqtWcB2";
 
 const app=initializeApp(firebaseConfig);
 const auth=getAuth(app);
-const db=initializeFirestore(app,{
-  experimentalAutoDetectLongPolling:true
-});
+const db=initializeFirestore(app,{experimentalAutoDetectLongPolling:true});
 
 const $=id=>document.getElementById(id);
 
@@ -54,6 +36,11 @@ let currentRoom="general";
 let roomName="الغرفة العامة";
 let heartbeat=null;
 let isOwner=false;
+let viewedUserId=null;
+
+const placeholder="data:image/svg+xml,"+encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" fill="#29251e"/><circle cx="50" cy="36" r="19" fill="#c49b3b"/><path d="M12 100c2-27 17-40 38-40s36 13 38 40" fill="#c49b3b"/></svg>'
+);
 
 function msg(id,t){
   $(id).textContent=t||"";
@@ -72,24 +59,27 @@ function err(e){
     "auth/operation-not-allowed":"طريقة الدخول غير مفعّلة في Firebase",
     "auth/network-request-failed":"تأكد من الإنترنت أو الـVPN"
   };
-
   return m[e.code]||e.message;
 }
 
 function makeInviteCode(){
   const bytes=new Uint8Array(16);
   crypto.getRandomValues(bytes);
+  return Array.from(bytes,b=>b.toString(16).padStart(2,"0")).join("");
+}
 
-  return Array.from(
-    bytes,
-    b=>b.toString(16).padStart(2,"0")
-  ).join("");
+function safeImageURL(value){
+  if(typeof value!=="string"||!value.trim())return "";
+  try{
+    const u=new URL(value.trim());
+    return u.protocol==="https:"?u.href:"";
+  }catch{
+    return "";
+  }
 }
 
 async function profile(u,n){
-  nick=(n||u.displayName||u.email?.split("@")[0]||"زائر")
-    .trim()
-    .slice(0,24);
+  nick=(n||u.displayName||u.email?.split("@")[0]||"زائر").trim().slice(0,24);
 
   if(u.displayName!==nick){
     await updateProfile(u,{displayName:nick});
@@ -105,9 +95,7 @@ async function profile(u,n){
 
 async function checkOwner(u){
   const roleSnap=await getDoc(doc(db,"roles",u.uid));
-
-  isOwner=roleSnap.exists()
-    && roleSnap.data().role==="owner";
+  isOwner=roleSnap.exists()&&roleSnap.data().role==="owner";
 }
 
 function setPresence(){
@@ -132,42 +120,144 @@ function setPresence(){
   },60000);
 }
 
-// عرض اسم العضو مع شارة المالك
+// صورة العضو القابلة للضغط
+function makeAvatar(uid,url,large=false){
+  const img=document.createElement("img");
+  img.className=large?"profileAvatar":"profilePic";
+  img.src=safeImageURL(url)||placeholder;
+  img.alt="صورة العضو";
+  img.onerror=()=>{img.src=placeholder;};
+  img.title="عرض الملف الشخصي";
+  img.onclick=()=>openProfile(uid);
+  return img;
+}
+
+// الاسم مع التاج الذهبي
 function renderName(element,uid,name){
   element.replaceChildren();
-
-  element.append(
-    document.createTextNode(name||"مستخدم")
-  );
+  element.append(document.createTextNode(name||"مستخدم"));
 
   if(isOwnerId(uid)){
     const badge=document.createElement("span");
-
     badge.textContent=" 👑";
     badge.style.color="#D4AF37";
     badge.style.fontSize="18px";
     badge.style.fontWeight="bold";
-
     element.append(badge);
   }
 }
 
+// فتح الملف الشخصي
+async function openProfile(uid){
+  try{
+    const snap=await getDoc(doc(db,"users",uid));
+
+    if(!snap.exists()){
+      alert("لم يتم العثور على ملف هذا العضو");
+      return;
+    }
+
+    const data=snap.data();
+    viewedUserId=uid;
+
+    $("viewName").textContent=data.name||"مستخدم";
+    $("viewRole").textContent=isOwnerId(uid)?"👑 OWNER":"عضو";
+    $("viewStatus").textContent=data.customStatus||"لا توجد حالة حالياً";
+
+    $("viewAvatar").src=safeImageURL(data.photoURL)||placeholder;
+    $("viewCover").src=safeImageURL(data.coverURL)||"";
+    $("viewCover").style.display=safeImageURL(data.coverURL)?"block":"none";
+
+    const own=uid===auth.currentUser?.uid;
+    $("editProfile").classList.toggle("hidden",!own);
+
+    if(own){
+      $("avatarURL").value=data.photoURL||"";
+      $("coverURL").value=data.coverURL||"";
+      $("customStatus").value=data.customStatus||"";
+      msg("profileMsg","");
+    }
+
+    $("profileModal").classList.remove("hidden");
+
+  }catch(e){
+    alert("تعذر فتح الملف الشخصي: "+err(e));
+  }
+}
+
+// إغلاق الملف الشخصي
+$("closeProfile").onclick=()=>{
+  $("profileModal").classList.add("hidden");
+  viewedUserId=null;
+};
+
+$("profileModal").addEventListener("click",e=>{
+  if(e.target===$("profileModal")){
+    $("profileModal").classList.add("hidden");
+    viewedUserId=null;
+  }
+});
+
+// حفظ الملف الشخصي
+$("saveProfile").onclick=async()=>{
+  const u=auth.currentUser;
+  if(!u||viewedUserId!==u.uid)return;
+
+  const photoURL=$("avatarURL").value.trim();
+  const coverURL=$("coverURL").value.trim();
+  const customStatus=$("customStatus").value.trim();
+
+  if(photoURL&&!safeImageURL(photoURL)){
+    msg("profileMsg","رابط الصورة الشخصية غير صحيح. استخدم رابط HTTPS");
+    return;
+  }
+
+  if(coverURL&&!safeImageURL(coverURL)){
+    msg("profileMsg","رابط الغلاف غير صحيح. استخدم رابط HTTPS");
+    return;
+  }
+
+  if(customStatus.length>100){
+    msg("profileMsg","الحالة يجب ألا تتجاوز 100 حرف");
+    return;
+  }
+
+  try{
+    await setDoc(doc(db,"users",u.uid),{
+      photoURL:safeImageURL(photoURL),
+      coverURL:safeImageURL(coverURL),
+      customStatus,
+      updatedAt:serverTimestamp()
+    },{merge:true});
+
+    $("viewAvatar").src=safeImageURL(photoURL)||placeholder;
+    $("viewCover").src=safeImageURL(coverURL)||"";
+    $("viewCover").style.display=coverURL?"block":"none";
+    $("viewStatus").textContent=customStatus||"لا توجد حالة حالياً";
+
+    msg("profileMsg","تم حفظ التغييرات بنجاح ✓");
+
+  }catch(e){
+    msg("profileMsg","تعذر الحفظ: "+err(e));
+  }
+};
+
 // عرض الرسائل
 function renderMessage(x,u){
   const el=document.createElement("div");
+  el.className="msg"+(x.senderId===u.uid?" mine":"");
 
-  el.className="msg"+(
-    x.senderId===u.uid?" mine":""
-  );
+  const header=document.createElement("div");
+  header.style.display="flex";
+  header.style.alignItems="center";
+  header.style.gap="8px";
 
+  const avatar=makeAvatar(x.senderId,x.photoURL);
   const n=document.createElement("div");
   n.className="name";
 
-  renderName(
-    n,
-    x.senderId,
-    x.nickname||"مستخدم"
-  );
+  renderName(n,x.senderId,x.nickname||"مستخدم");
+  header.append(avatar,n);
 
   const b=document.createElement("div");
   b.className="body";
@@ -175,20 +265,14 @@ function renderMessage(x,u){
 
   const tm=document.createElement("div");
   tm.className="time";
-
   tm.textContent=x.createdAt?.toDate
-    ?x.createdAt.toDate().toLocaleTimeString(
-      "ar-IQ",
-      {hour:"2-digit",minute:"2-digit"}
-    )
+    ?x.createdAt.toDate().toLocaleTimeString("ar-IQ",{hour:"2-digit",minute:"2-digit"})
     :"الآن";
 
-  el.append(n,b,tm);
-
+  el.append(header,b,tm);
   $("messages").append(el);
 }
 
-// متابعة الرسائل
 function watchMessages(u){
   if(stopMessages)stopMessages();
 
@@ -200,18 +284,12 @@ function watchMessages(u){
 
   stopMessages=onSnapshot(q,s=>{
     const area=$("messages");
-
     area.replaceChildren();
 
-    s.forEach(d=>{
-      renderMessage(d.data(),u);
-    });
-
+    s.forEach(d=>renderMessage(d.data(),u));
     area.scrollTop=area.scrollHeight;
 
-  },e=>{
-    msg("chatMsg","تعذر تحديث الرسائل: "+err(e));
-  });
+  },e=>msg("chatMsg","تعذر تحديث الرسائل: "+err(e)));
 }
 
 // متابعة الغرف
@@ -220,98 +298,72 @@ function watchRooms(u){
 
   const q=isOwner
     ?query(collection(db,"rooms"))
-    :query(
-      collection(db,"rooms"),
-      where("members","array-contains",u.uid)
-    );
+    :query(collection(db,"rooms"),where("members","array-contains",u.uid));
 
   stopRooms=onSnapshot(q,s=>{
     const list=$("roomList");
-
     list.replaceChildren();
 
     const general=document.createElement("button");
-
-    general.className="roomChoice"+
-      (currentRoom==="general"?" selected":"");
-
+    general.className="roomChoice"+(currentRoom==="general"?" selected":"");
     general.textContent="🌐 الغرفة العامة";
-
-    general.onclick=()=>{
-      switchRoom("general","الغرفة العامة",u);
-    };
-
+    general.onclick=()=>switchRoom("general","الغرفة العامة",u);
     list.append(general);
 
     s.forEach(d=>{
       const r=d.data();
-
       const b=document.createElement("button");
+      b.className="roomChoice"+(currentRoom===d.id?" selected":"");
 
-      b.className="roomChoice"+
-        (currentRoom===d.id?" selected":"");
+      b.textContent=(r.isPrivate?"🔒 ":"💬 ")+(r.name||"غرفة")+
+        (isOwnerId(r.ownerId)?" 👑":"");
 
-      const crown=isOwnerId(r.ownerId)?" 👑":"";
+      if(isOwnerId(r.ownerId))b.style.color="#D4AF37";
 
-      b.textContent=
-        (r.isPrivate?"🔒 ":"💬 ")+
-        (r.name||"غرفة")+
-        crown;
-
-      if(isOwnerId(r.ownerId)){
-        b.style.color="#D4AF37";
-      }
-
-      b.onclick=()=>{
-        switchRoom(d.id,r.name||"غرفة",u);
-      };
-
+      b.onclick=()=>switchRoom(d.id,r.name||"غرفة",u);
       list.append(b);
     });
 
-  },e=>{
-    msg("chatMsg","تعذر تحميل الغرف: "+err(e));
-  });
+  },e=>msg("chatMsg","تعذر تحميل الغرف: "+err(e)));
 }
 
 // قائمة المتصلين
 function watchUsers(u){
   if(stopUsers)stopUsers();
 
-  const q=query(
-    collection(db,"users"),
-    where("status","==","online")
-  );
+  const q=query(collection(db,"users"),where("status","==","online"));
 
   stopUsers=onSnapshot(q,s=>{
     const list=$("onlineList");
-
     list.replaceChildren();
-
     let count=0;
 
     s.forEach(d=>{
       if(d.id===u.uid)return;
 
       const data=d.data();
-
       const row=document.createElement("div");
       row.className="onlineUser";
 
       const dot=document.createElement("span");
       dot.className="dot";
 
-      const name=document.createElement("span");
+      const avatar=makeAvatar(d.id,data.photoURL);
 
-      renderName(
-        name,
-        d.id,
-        data.name||"زائر"
-      );
+      const details=document.createElement("div");
+      details.style.minWidth="0";
 
-      row.append(dot,name);
+      const name=document.createElement("div");
+      name.className="name";
+      renderName(name,d.id,data.name||"زائر");
+
+      const status=document.createElement("small");
+      status.style.color="#aaa";
+      status.textContent=data.customStatus||"متصل الآن";
+
+      details.append(name,status);
+      row.append(dot,avatar,details);
       list.append(row);
-
       count++;
     });
 
@@ -319,37 +371,26 @@ function watchUsers(u){
 
     if(!count){
       const empty=document.createElement("small");
-
-      empty.textContent=
-        "ماكو أعضاء آخرين ظاهرين حالياً";
-
+      empty.textContent="ماكو أعضاء آخرين ظاهرين حالياً";
       list.append(empty);
     }
 
-  },e=>{
-    msg("chatMsg","تعذر تحميل قائمة المتصلين: "+err(e));
-  });
+  },e=>msg("chatMsg","تعذر تحميل قائمة المتصلين: "+err(e)));
 }
 
-// الانتقال بين الغرف
 function switchRoom(id,name,u){
   currentRoom=id;
   roomName=name;
-
   $("roomTitle").textContent=name;
-
-  $("roomSubtitle").textContent=
-    id==="general"
-      ?"احچي باحترام وخلي اللمة حلوة"
-      :"محادثة أعضاء الغرفة";
+  $("roomSubtitle").textContent=id==="general"
+    ?"احچي باحترام وخلي اللمة حلوة"
+    :"محادثة أعضاء الغرفة";
 
   watchMessages(u);
   watchRooms(u);
-
   msg("chatMsg","");
 }
 
-// إنشاء غرفة خاصة
 async function createRoom(){
   const u=auth.currentUser;
   const name=$("newRoomName").value.trim();
@@ -367,35 +408,18 @@ async function createRoom(){
   try{
     const code=makeInviteCode();
 
-    const ref=await addDoc(
-      collection(db,"rooms"),
-      {
-        name,
-        isPrivate:true,
-        ownerId:u.uid,
-        members:[u.uid],
-        inviteCode:code,
-        createdAt:serverTimestamp()
-      }
-    );
+    const ref=await addDoc(collection(db,"rooms"),{
+      name,isPrivate:true,ownerId:u.uid,members:[u.uid],
+      inviteCode:code,createdAt:serverTimestamp()
+    });
 
-    await setDoc(
-      doc(db,"roomInvites",code),
-      {
-        roomId:ref.id,
-        roomName:name,
-        ownerId:u.uid,
-        createdAt:serverTimestamp()
-      }
-    );
+    await setDoc(doc(db,"roomInvites",code),{
+      roomId:ref.id,roomName:name,ownerId:u.uid,
+      createdAt:serverTimestamp()
+    });
 
     $("newRoomName").value="";
-
-    msg(
-      "roomMsg",
-      "تم إنشاء الغرفة. رمز الدعوة: "+code
-    );
-
+    msg("roomMsg","تم إنشاء الغرفة. رمز الدعوة: "+code);
     switchRoom(ref.id,name,u);
 
   }catch(e){
@@ -403,10 +427,8 @@ async function createRoom(){
   }
 }
 
-// الانضمام إلى غرفة بالدعوة
 async function joinRoom(){
   const u=auth.currentUser;
-
   const code=$("inviteCode").value.trim().toLowerCase();
 
   if(!u||!code){
@@ -415,45 +437,28 @@ async function joinRoom(){
   }
 
   try{
-    const invite=await getDoc(
-      doc(db,"roomInvites",code)
-    );
-
-    if(!invite.exists()){
-      throw Error("رمز الدعوة غير صحيح");
-    }
+    const invite=await getDoc(doc(db,"roomInvites",code));
+    if(!invite.exists())throw Error("رمز الدعوة غير صحيح");
 
     const data=invite.data();
-
     const roomRef=doc(db,"rooms",data.roomId);
-
     const roomSnap=await getDoc(roomRef);
 
-    if(!roomSnap.exists()){
-      throw Error("الغرفة غير موجودة");
-    }
+    if(!roomSnap.exists())throw Error("الغرفة غير موجودة");
 
     const room=roomSnap.data();
 
-    if(!isOwner && room.inviteCode!==code){
+    if(!isOwner&&room.inviteCode!==code){
       throw Error("رمز الدعوة غير صالح لهذه الغرفة");
     }
 
-    if(!isOwner && !room.members.includes(u.uid)){
-      await updateDoc(roomRef,{
-        members:arrayUnion(u.uid)
-      });
+    if(!isOwner&&!room.members.includes(u.uid)){
+      await updateDoc(roomRef,{members:arrayUnion(u.uid)});
     }
 
     $("inviteCode").value="";
-
     msg("roomMsg","تم الدخول إلى الغرفة");
-
-    switchRoom(
-      data.roomId,
-      data.roomName||"غرفة",
-      u
-    );
+    switchRoom(data.roomId,data.roomName||"غرفة",u);
 
   }catch(e){
     msg("roomMsg","تعذر الانضمام: "+err(e));
@@ -463,18 +468,13 @@ async function joinRoom(){
 // التسجيل
 $("register").onclick=async()=>{
   try{
-    if(!$("nick").value.trim()){
-      throw Error("اكتب الاسم الظاهر أولاً");
-    }
+    if(!$("nick").value.trim())throw Error("اكتب الاسم الظاهر أولاً");
 
     const r=await createUserWithEmailAndPassword(
-      auth,
-      $("email").value.trim(),
-      $("pass").value
+      auth,$("email").value.trim(),$("pass").value
     );
 
     await profile(r.user,$("nick").value);
-
     msg("authMsg","");
 
   }catch(e){
@@ -486,13 +486,10 @@ $("register").onclick=async()=>{
 $("login").onclick=async()=>{
   try{
     const r=await signInWithEmailAndPassword(
-      auth,
-      $("email").value.trim(),
-      $("pass").value
+      auth,$("email").value.trim(),$("pass").value
     );
 
     await profile(r.user,$("nick").value);
-
     msg("authMsg","");
 
   }catch(e){
@@ -500,17 +497,13 @@ $("login").onclick=async()=>{
   }
 };
 
-// الدخول كزائر
+// زائر
 $("guest").onclick=async()=>{
   try{
-    if(!$("nick").value.trim()){
-      throw Error("اكتب اسماً مستعاراً أولاً");
-    }
+    if(!$("nick").value.trim())throw Error("اكتب اسماً مستعاراً أولاً");
 
     const r=await signInAnonymously(auth);
-
     await profile(r.user,$("nick").value);
-
     msg("authMsg","");
 
   }catch(e){
@@ -524,18 +517,12 @@ $("logout").onclick=async()=>{
     const u=auth.currentUser;
 
     if(u){
-      await setDoc(
-        doc(db,"users",u.uid),
-        {
-          status:"offline",
-          updatedAt:serverTimestamp()
-        },
-        {merge:true}
-      );
+      await setDoc(doc(db,"users",u.uid),{
+        status:"offline",updatedAt:serverTimestamp()
+      },{merge:true});
     }
 
     if(heartbeat)clearInterval(heartbeat);
-
     await signOut(auth);
 
   }catch(e){
@@ -549,39 +536,35 @@ $("send").onsubmit=async e=>{
 
   const t=$("message").value.trim();
   const u=auth.currentUser;
-
   if(!t||!u)return;
 
   $("message").value="";
 
   try{
-    await addDoc(
-      collection(db,"messages"),
-      {
-        roomId:currentRoom,
-        senderId:u.uid,
-        nickname:nick||u.displayName||"زائر",
-        text:t,
-        createdAt:serverTimestamp()
-      }
-    );
+    const userSnap=await getDoc(doc(db,"users",u.uid));
+    const userData=userSnap.exists()?userSnap.data():{};
+
+    await addDoc(collection(db,"messages"),{
+      roomId:currentRoom,
+      senderId:u.uid,
+      nickname:nick||u.displayName||"زائر",
+      photoURL:userData.photoURL||"",
+      text:t,
+      createdAt:serverTimestamp()
+    });
 
     msg("chatMsg","");
 
   }catch(x){
     $("message").value=t;
-
-    msg(
-      "chatMsg",
-      "لم تُرسل الرسالة: "+err(x)
-    );
+    msg("chatMsg","لم تُرسل الرسالة: "+err(x));
   }
 };
 
 $("createRoom").onclick=createRoom;
 $("joinRoom").onclick=joinRoom;
 
-// متابعة حالة تسجيل الدخول
+// متابعة تسجيل الدخول
 onAuthStateChanged(auth,async u=>{
   if(!u){
     isOwner=false;
@@ -589,42 +572,32 @@ onAuthStateChanged(auth,async u=>{
     if(stopMessages)stopMessages();
     if(stopRooms)stopRooms();
     if(stopUsers)stopUsers();
-
     if(heartbeat)clearInterval(heartbeat);
 
     $("chat").classList.add("hidden");
     $("auth").classList.remove("hidden");
-
+    $("profileModal").classList.add("hidden");
     return;
   }
 
   try{
-    if(!nick){
-      await profile(u,u.displayName);
-    }
-
+    if(!nick)await profile(u,u.displayName);
     await checkOwner(u);
 
     $("auth").classList.add("hidden");
     $("chat").classList.remove("hidden");
 
     if(isOwner){
-      $("who").textContent=
-        "👑 OWNER | "+(nick||u.displayName||"AHMED");
-
+      $("who").textContent="👑 OWNER | "+(nick||u.displayName||"AHMED");
       $("who").style.color="#D4AF37";
       $("who").style.fontWeight="bold";
-
     }else{
-      $("who").textContent=
-        nick||u.displayName||"زائر";
-
+      $("who").textContent=nick||u.displayName||"زائر";
       $("who").style.color="";
       $("who").style.fontWeight="";
     }
 
     setPresence();
-
     watchMessages(u);
     watchRooms(u);
     watchUsers(u);
