@@ -8,7 +8,8 @@ import {
 
 import {
   initializeFirestore,collection,addDoc,query,where,orderBy,
-  onSnapshot,serverTimestamp,doc,setDoc,getDoc,updateDoc,arrayUnion
+  onSnapshot,serverTimestamp,doc,setDoc,getDoc,updateDoc,
+  arrayUnion,arrayRemove,deleteDoc,Timestamp
 } from "https://www.gstatic.com/firebasejs/11.6.0/firebase-firestore.js";
 
 const firebaseConfig={
@@ -24,7 +25,9 @@ const OWNER_UID="dvdFivbIZ9P7gsDZmFx0RLqtWcB2";
 
 const app=initializeApp(firebaseConfig);
 const auth=getAuth(app);
-const db=initializeFirestore(app,{experimentalAutoDetectLongPolling:true});
+const db=initializeFirestore(app,{
+  experimentalAutoDetectLongPolling:true
+});
 
 const $=id=>document.getElementById(id);
 
@@ -35,8 +38,11 @@ let stopUsers=null;
 let currentRoom="general";
 let roomName="الغرفة العامة";
 let heartbeat=null;
+
 let isOwner=false;
+let myRole="member";
 let viewedUserId=null;
+let blockedFromGeneral=false;
 
 const placeholder="data:image/svg+xml,"+encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" fill="#29251e"/><circle cx="50" cy="36" r="19" fill="#c49b3b"/><path d="M12 100c2-27 17-40 38-40s36 13 38 40" fill="#c49b3b"/></svg>'
@@ -50,6 +56,14 @@ function isOwnerId(uid){
   return uid===OWNER_UID;
 }
 
+function canModerate(){
+  return isOwner||myRole==="admin"||myRole==="moderator";
+}
+
+function canFullBan(){
+  return isOwner||myRole==="admin";
+}
+
 function err(e){
   const m={
     "auth/invalid-email":"البريد الإلكتروني غير صحيح",
@@ -57,19 +71,26 @@ function err(e){
     "auth/email-already-in-use":"هذا البريد مسجل مسبقاً",
     "auth/invalid-credential":"البريد أو كلمة المرور غير صحيحة",
     "auth/operation-not-allowed":"طريقة الدخول غير مفعّلة في Firebase",
-    "auth/network-request-failed":"تأكد من الإنترنت أو الـVPN"
+    "auth/network-request-failed":"تأكد من الإنترنت أو الـVPN",
+    "permission-denied":"ما عندك صلاحية لتنفيذ هذا الإجراء",
+    "failed-precondition":"توجد مشكلة في إعدادات قاعدة البيانات"
   };
-  return m[e.code]||e.message;
+
+  return m[e.code]||e.message||"حدث خطأ غير معروف";
 }
 
 function makeInviteCode(){
   const bytes=new Uint8Array(16);
   crypto.getRandomValues(bytes);
-  return Array.from(bytes,b=>b.toString(16).padStart(2,"0")).join("");
+
+  return Array.from(
+    bytes,b=>b.toString(16).padStart(2,"0")
+  ).join("");
 }
 
 function safeImageURL(value){
   if(typeof value!=="string"||!value.trim())return "";
+
   try{
     const u=new URL(value.trim());
     return u.protocol==="https:"?u.href:"";
@@ -78,8 +99,62 @@ function safeImageURL(value){
   }
 }
 
+function roleName(role){
+  if(role==="owner")return "👑 OWNER";
+  if(role==="admin")return "🛡️ ADMIN";
+  if(role==="moderator")return "🔰 MODERATOR";
+  return "عضو";
+}
+
+// قراءة رتبة المستخدم والتحقق من انتهائها
+async function loadMyRole(u){
+  isOwner=isOwnerId(u.uid);
+  myRole="member";
+
+  if(isOwner)return;
+
+  const snap=await getDoc(doc(db,"roles",u.uid));
+
+  if(!snap.exists())return;
+
+  const data=snap.data();
+
+  if(
+    data.expiresAt?.toDate &&
+    data.expiresAt.toDate().getTime()>Date.now() &&
+    ["admin","moderator"].includes(data.role)
+  ){
+    myRole=data.role;
+  }
+}
+
+// التحقق من الحظر الكامل
+async function checkFullBan(uid){
+  const snap=await getDoc(doc(db,"bans",uid));
+
+  if(!snap.exists())return false;
+
+  const data=snap.data();
+
+  if(data.permanent===true)return true;
+
+  if(data.expiresAt?.toDate){
+    return data.expiresAt.toDate().getTime()>Date.now();
+  }
+
+  return false;
+}
+
+// التحقق من منع العامة
+async function checkGeneralBlock(uid){
+  const snap=await getDoc(doc(db,"generalBlocks",uid));
+  return snap.exists();
+}
+
+// الملف الشخصي
 async function profile(u,n){
-  nick=(n||u.displayName||u.email?.split("@")[0]||"زائر").trim().slice(0,24);
+  nick=(n||u.displayName||u.email?.split("@")[0]||"زائر")
+    .trim().slice(0,24);
 
   if(u.displayName!==nick){
     await updateProfile(u,{displayName:nick});
@@ -93,11 +168,7 @@ async function profile(u,n){
   },{merge:true});
 }
 
-async function checkOwner(u){
-  const roleSnap=await getDoc(doc(db,"roles",u.uid));
-  isOwner=roleSnap.exists()&&roleSnap.data().role==="owner";
-}
-
+// تحديث حالة الاتصال
 function setPresence(){
   const u=auth.currentUser;
   if(!u)return;
@@ -120,34 +191,53 @@ function setPresence(){
   },60000);
 }
 
-// صورة العضو القابلة للضغط
+// الصورة الشخصية
 function makeAvatar(uid,url,large=false){
   const img=document.createElement("img");
+
   img.className=large?"profileAvatar":"profilePic";
   img.src=safeImageURL(url)||placeholder;
   img.alt="صورة العضو";
-  img.onerror=()=>{img.src=placeholder;};
+
+  img.onerror=()=>{
+    img.src=placeholder;
+  };
+
   img.title="عرض الملف الشخصي";
   img.onclick=()=>openProfile(uid);
+
   return img;
 }
 
-// الاسم مع التاج الذهبي
-function renderName(element,uid,name){
+// الاسم والتاج
+function renderName(element,uid,name,role="member"){
   element.replaceChildren();
   element.append(document.createTextNode(name||"مستخدم"));
 
-  if(isOwnerId(uid)){
+  let badgeText="";
+  let badgeColor="#aaa";
+
+  if(uid===OWNER_UID){
+    badgeText=" 👑";
+    badgeColor="#D4AF37";
+  }else if(role==="admin"){
+    badgeText=" 🛡️";
+    badgeColor="#e6c36a";
+  }else if(role==="moderator"){
+    badgeText=" 🔰";
+    badgeColor="#8fc7e8";
+  }
+
+  if(badgeText){
     const badge=document.createElement("span");
-    badge.textContent=" 👑";
-    badge.style.color="#D4AF37";
-    badge.style.fontSize="18px";
+    badge.textContent=badgeText;
+    badge.style.color=badgeColor;
     badge.style.fontWeight="bold";
     element.append(badge);
   }
 }
 
-// فتح الملف الشخصي
+// عرض الملف الشخصي
 async function openProfile(uid){
   try{
     const snap=await getDoc(doc(db,"users",uid));
@@ -160,8 +250,27 @@ async function openProfile(uid){
     const data=snap.data();
     viewedUserId=uid;
 
+    let targetRole="member";
+
+    if(uid===OWNER_UID){
+      targetRole="owner";
+    }else{
+      const roleSnap=await getDoc(doc(db,"roles",uid));
+
+      if(roleSnap.exists()){
+        const rd=roleSnap.data();
+
+        if(
+          rd.expiresAt?.toDate &&
+          rd.expiresAt.toDate().getTime()>Date.now()
+        ){
+          targetRole=rd.role;
+        }
+      }
+    }
+
     $("viewName").textContent=data.name||"مستخدم";
-    $("viewRole").textContent=isOwnerId(uid)?"👑 OWNER":"عضو";
+    $("viewRole").textContent=roleName(targetRole);
     $("viewStatus").textContent=data.customStatus||"لا توجد حالة حالياً";
 
     $("viewAvatar").src=safeImageURL(data.photoURL)||placeholder;
@@ -169,6 +278,7 @@ async function openProfile(uid){
     $("viewCover").style.display=safeImageURL(data.coverURL)?"block":"none";
 
     const own=uid===auth.currentUser?.uid;
+
     $("editProfile").classList.toggle("hidden",!own);
 
     if(own){
@@ -178,11 +288,73 @@ async function openProfile(uid){
       msg("profileMsg","");
     }
 
+    const showModeration=
+      canModerate() &&
+      !own &&
+      uid!==OWNER_UID;
+
+    $("moderationPanel").classList.toggle(
+      "hidden",!showModeration
+    );
+
+    if(showModeration){
+      msg("moderationMsg","");
+      $("moderationReason").value="";
+      updateModerationOptions();
+    }
+
     $("profileModal").classList.remove("hidden");
 
   }catch(e){
     alert("تعذر فتح الملف الشخصي: "+err(e));
   }
+}
+
+// خيارات الإدارة حسب الرتبة والغرفة
+function updateModerationOptions(){
+  const select=$("moderationAction");
+  const duration=$("moderationDuration");
+
+  const options=[
+    ["mute","كتم في العامة",true],
+    ["generalBlock","منع من العامة",true],
+    ["unmute","رفع الكتم",true],
+    ["unblockGeneral","رفع منع العامة",true]
+  ];
+
+  if(currentRoom!=="general"){
+    options.push(["roomKick","طرد من الغرفة الخاصة",true]);
+  }
+
+  if(canFullBan()){
+    options.push(["fullBan","حظر كامل مؤقت",true]);
+  }
+
+  if(isOwner){
+    options.push(["permanentBan","حظر كامل دائم",true]);
+  }
+
+  if(canFullBan()){
+    options.push(["unban","رفع الحظر الكامل",true]);
+  }
+
+  select.replaceChildren();
+
+  options.forEach(([value,label])=>{
+    const option=document.createElement("option");
+    option.value=value;
+    option.textContent=label;
+    select.append(option);
+  });
+
+  duration.disabled=false;
+
+  select.onchange=()=>{
+    const permanent=select.value==="permanentBan";
+    duration.disabled=permanent;
+  };
+
+  select.dispatchEvent(new Event("change"));
 }
 
 // إغلاق الملف الشخصي
@@ -201,6 +373,7 @@ $("profileModal").addEventListener("click",e=>{
 // حفظ الملف الشخصي
 $("saveProfile").onclick=async()=>{
   const u=auth.currentUser;
+
   if(!u||viewedUserId!==u.uid)return;
 
   const photoURL=$("avatarURL").value.trim();
@@ -208,12 +381,12 @@ $("saveProfile").onclick=async()=>{
   const customStatus=$("customStatus").value.trim();
 
   if(photoURL&&!safeImageURL(photoURL)){
-    msg("profileMsg","رابط الصورة الشخصية غير صحيح. استخدم رابط HTTPS");
+    msg("profileMsg","رابط الصورة الشخصية غير صحيح. استخدم HTTPS");
     return;
   }
 
   if(coverURL&&!safeImageURL(coverURL)){
-    msg("profileMsg","رابط الغلاف غير صحيح. استخدم رابط HTTPS");
+    msg("profileMsg","رابط الغلاف غير صحيح. استخدم HTTPS");
     return;
   }
 
@@ -242,9 +415,152 @@ $("saveProfile").onclick=async()=>{
   }
 };
 
+// تنفيذ أوامر الإدارة
+$("applyModeration").onclick=async()=>{
+  const u=auth.currentUser;
+  const target= viewedUserId;
+
+  if(!u||!target)return;
+
+  if(!canModerate()){
+    msg("moderationMsg","ليس لديك صلاحية الإدارة");
+    return;
+  }
+
+  if(target===u.uid||target===OWNER_UID){
+    msg("moderationMsg","لا يمكنك تنفيذ هذا الإجراء على هذا العضو");
+    return;
+  }
+
+  const action=$("moderationAction").value;
+  const duration=Number($("moderationDuration").value);
+  const reason=$("moderationReason").value.trim().slice(0,200);
+
+  const button=$("applyModeration");
+  button.disabled=true;
+  msg("moderationMsg","جارٍ تنفيذ الإجراء...");
+
+  try{
+    const now=Date.now();
+    const expiresAt=Timestamp.fromDate(
+      new Date(now+duration*60000)
+    );
+
+    const base={
+      reason,
+      by:u.uid,
+      createdAt:serverTimestamp()
+    };
+
+    if(action==="mute"){
+      await setDoc(doc(db,"mutes",target),{
+        ...base,
+        durationMinutes:duration,
+        expiresAt
+      });
+
+      msg("moderationMsg","تم كتم العضو بنجاح ✓");
+    }
+
+    else if(action==="generalBlock"){
+      await setDoc(doc(db,"generalBlocks",target),base);
+
+      msg("moderationMsg","تم منع العضو من العامة ✓");
+    }
+
+    else if(action==="roomKick"){
+      if(currentRoom==="general"){
+        throw Error("اختر غرفة خاصة أولاً");
+      }
+
+      const roomRef=doc(db,"rooms",currentRoom);
+      const roomSnap=await getDoc(roomRef);
+
+      if(!roomSnap.exists()){
+        throw Error("الغرفة غير موجودة");
+      }
+
+      const members=roomSnap.data().members||[];
+
+      if(!members.includes(target)){
+        throw Error("العضو ليس في هذه الغرفة");
+      }
+
+      await updateDoc(roomRef,{
+        members:arrayRemove(target)
+      });
+
+      msg("moderationMsg","تم طرد العضو من الغرفة ✓");
+    }
+
+    else if(action==="fullBan"){
+      if(!canFullBan()){
+        throw Error("هذه الصلاحية للمالك والأدمن فقط");
+      }
+
+      await setDoc(doc(db,"bans",target),{
+        ...base,
+        permanent:false,
+        durationMinutes:duration,
+        expiresAt
+      });
+
+      msg("moderationMsg","تم الحظر الكامل المؤقت ✓");
+    }
+
+    else if(action==="permanentBan"){
+      if(!isOwner){
+        throw Error("الحظر الدائم للمالك فقط");
+      }
+
+      await setDoc(doc(db,"bans",target),{
+        ...base,
+        permanent:true
+      });
+
+      msg("moderationMsg","تم الحظر الكامل الدائم ✓");
+    }
+
+    else if(action==="unmute"){
+      await deleteDoc(doc(db,"mutes",target));
+      msg("moderationMsg","تم رفع الكتم ✓");
+    }
+
+    else if(action==="unblockGeneral"){
+      await deleteDoc(doc(db,"generalBlocks",target));
+      msg("moderationMsg","تم رفع منع العامة ✓");
+    }
+
+    else if(action==="unban"){
+      if(!canFullBan()){
+        throw Error("ليس لديك صلاحية رفع الحظر الكامل");
+      }
+
+      const banSnap=await getDoc(doc(db,"bans",target));
+
+      if(banSnap.exists()&&banSnap.data().permanent===true&&!isOwner){
+        throw Error("رفع الحظر الدائم للمالك فقط");
+      }
+
+      await deleteDoc(doc(db,"bans",target));
+      msg("moderationMsg","تم رفع الحظر الكامل ✓");
+    }
+
+    else{
+      throw Error("نوع الإجراء غير معروف");
+    }
+
+  }catch(e){
+    msg("moderationMsg","تعذر تنفيذ الإجراء: "+err(e));
+  }finally{
+    button.disabled=false;
+  }
+};
+
 // عرض الرسائل
 function renderMessage(x,u){
   const el=document.createElement("div");
+
   el.className="msg"+(x.senderId===u.uid?" mine":"");
 
   const header=document.createElement("div");
@@ -253,10 +569,12 @@ function renderMessage(x,u){
   header.style.gap="8px";
 
   const avatar=makeAvatar(x.senderId,x.photoURL);
+
   const n=document.createElement("div");
   n.className="name";
 
-  renderName(n,x.senderId,x.nickname||"مستخدم");
+  renderName(n,x.senderId,x.nickname||"مستخدم",x.senderRole||"member");
+
   header.append(avatar,n);
 
   const b=document.createElement("div");
@@ -265,16 +583,28 @@ function renderMessage(x,u){
 
   const tm=document.createElement("div");
   tm.className="time";
+
   tm.textContent=x.createdAt?.toDate
-    ?x.createdAt.toDate().toLocaleTimeString("ar-IQ",{hour:"2-digit",minute:"2-digit"})
+    ?x.createdAt.toDate().toLocaleTimeString(
+      "ar-IQ",{hour:"2-digit",minute:"2-digit"}
+    )
     :"الآن";
 
   el.append(header,b,tm);
   $("messages").append(el);
 }
 
+// متابعة الرسائل
 function watchMessages(u){
   if(stopMessages)stopMessages();
+  stopMessages=null;
+
+  $("messages").replaceChildren();
+
+  if(currentRoom==="general"&&blockedFromGeneral){
+    msg("chatMsg","أنت ممنوع من دخول الغرفة العامة حتى يرفع المشرف الحظر.");
+    return;
+  }
 
   const q=query(
     collection(db,"messages"),
@@ -287,6 +617,7 @@ function watchMessages(u){
     area.replaceChildren();
 
     s.forEach(d=>renderMessage(d.data(),u));
+
     area.scrollTop=area.scrollHeight;
 
   },e=>msg("chatMsg","تعذر تحديث الرسائل: "+err(e)));
@@ -298,27 +629,41 @@ function watchRooms(u){
 
   const q=isOwner
     ?query(collection(db,"rooms"))
-    :query(collection(db,"rooms"),where("members","array-contains",u.uid));
+    :query(
+      collection(db,"rooms"),
+      where("members","array-contains",u.uid)
+    );
 
   stopRooms=onSnapshot(q,s=>{
     const list=$("roomList");
     list.replaceChildren();
 
     const general=document.createElement("button");
-    general.className="roomChoice"+(currentRoom==="general"?" selected":"");
+    general.className="roomChoice"+
+      (currentRoom==="general"?" selected":"");
+
     general.textContent="🌐 الغرفة العامة";
-    general.onclick=()=>switchRoom("general","الغرفة العامة",u);
+
+    general.onclick=()=>switchRoom(
+      "general","الغرفة العامة",u
+    );
+
     list.append(general);
 
     s.forEach(d=>{
       const r=d.data();
       const b=document.createElement("button");
-      b.className="roomChoice"+(currentRoom===d.id?" selected":"");
 
-      b.textContent=(r.isPrivate?"🔒 ":"💬 ")+(r.name||"غرفة")+
+      b.className="roomChoice"+
+        (currentRoom===d.id?" selected":"");
+
+      b.textContent=(r.isPrivate?"🔒 ":"💬 ")+
+        (r.name||"غرفة")+
         (isOwnerId(r.ownerId)?" 👑":"");
 
-      if(isOwnerId(r.ownerId))b.style.color="#D4AF37";
+      if(isOwnerId(r.ownerId)){
+        b.style.color="#D4AF37";
+      }
 
       b.onclick=()=>switchRoom(d.id,r.name||"غرفة",u);
       list.append(b);
@@ -331,17 +676,22 @@ function watchRooms(u){
 function watchUsers(u){
   if(stopUsers)stopUsers();
 
-  const q=query(collection(db,"users"),where("status","==","online"));
+  const q=query(
+    collection(db,"users"),
+    where("status","==","online")
+  );
 
   stopUsers=onSnapshot(q,s=>{
     const list=$("onlineList");
     list.replaceChildren();
+
     let count=0;
 
     s.forEach(d=>{
       if(d.id===u.uid)return;
 
       const data=d.data();
+
       const row=document.createElement("div");
       row.className="onlineUser";
 
@@ -355,7 +705,8 @@ function watchUsers(u){
 
       const name=document.createElement("div");
       name.className="name";
-      renderName(name,d.id,data.name||"زائر");
+
+      renderName(name,d.id,data.name||"زائر",data.role||"member");
 
       const status=document.createElement("small");
       status.style.color="#aaa";
@@ -364,6 +715,7 @@ function watchUsers(u){
       details.append(name,status);
       row.append(dot,avatar,details);
       list.append(row);
+
       count++;
     });
 
@@ -378,19 +730,42 @@ function watchUsers(u){
   },e=>msg("chatMsg","تعذر تحميل قائمة المتصلين: "+err(e)));
 }
 
-function switchRoom(id,name,u){
+// تبديل الغرفة
+async function switchRoom(id,name,u){
+  if(id==="general"){
+    try{
+      blockedFromGeneral=await checkGeneralBlock(u.uid);
+    }catch(e){
+      msg("chatMsg","تعذر التحقق من صلاحية دخول العامة: "+err(e));
+      return;
+    }
+
+    if(blockedFromGeneral){
+      msg("chatMsg","أنت ممنوع من دخول الغرفة العامة حتى يرفع المشرف الحظر.");
+      return;
+    }
+  }
+
   currentRoom=id;
   roomName=name;
+
   $("roomTitle").textContent=name;
+
   $("roomSubtitle").textContent=id==="general"
     ?"احچي باحترام وخلي اللمة حلوة"
     :"محادثة أعضاء الغرفة";
 
   watchMessages(u);
   watchRooms(u);
+
+  if(viewedUserId){
+    updateModerationOptions();
+  }
+
   msg("chatMsg","");
 }
 
+// إنشاء غرفة خاصة
 async function createRoom(){
   const u=auth.currentUser;
   const name=$("newRoomName").value.trim();
@@ -409,17 +784,25 @@ async function createRoom(){
     const code=makeInviteCode();
 
     const ref=await addDoc(collection(db,"rooms"),{
-      name,isPrivate:true,ownerId:u.uid,members:[u.uid],
-      inviteCode:code,createdAt:serverTimestamp()
+      name,
+      isPrivate:true,
+      ownerId:u.uid,
+      members:[u.uid],
+      inviteCode:code,
+      createdAt:serverTimestamp()
     });
 
     await setDoc(doc(db,"roomInvites",code),{
-      roomId:ref.id,roomName:name,ownerId:u.uid,
+      roomId:ref.id,
+      roomName:name,
+      ownerId:u.uid,
       createdAt:serverTimestamp()
     });
 
     $("newRoomName").value="";
+
     msg("roomMsg","تم إنشاء الغرفة. رمز الدعوة: "+code);
+
     switchRoom(ref.id,name,u);
 
   }catch(e){
@@ -427,6 +810,7 @@ async function createRoom(){
   }
 }
 
+// الانضمام إلى غرفة خاصة
 async function joinRoom(){
   const u=auth.currentUser;
   const code=$("inviteCode").value.trim().toLowerCase();
@@ -438,13 +822,19 @@ async function joinRoom(){
 
   try{
     const invite=await getDoc(doc(db,"roomInvites",code));
-    if(!invite.exists())throw Error("رمز الدعوة غير صحيح");
+
+    if(!invite.exists()){
+      throw Error("رمز الدعوة غير صحيح");
+    }
 
     const data=invite.data();
+
     const roomRef=doc(db,"rooms",data.roomId);
     const roomSnap=await getDoc(roomRef);
 
-    if(!roomSnap.exists())throw Error("الغرفة غير موجودة");
+    if(!roomSnap.exists()){
+      throw Error("الغرفة غير موجودة");
+    }
 
     const room=roomSnap.data();
 
@@ -453,11 +843,14 @@ async function joinRoom(){
     }
 
     if(!isOwner&&!room.members.includes(u.uid)){
-      await updateDoc(roomRef,{members:arrayUnion(u.uid)});
+      await updateDoc(roomRef,{
+        members:arrayUnion(u.uid)
+      });
     }
 
     $("inviteCode").value="";
     msg("roomMsg","تم الدخول إلى الغرفة");
+
     switchRoom(data.roomId,data.roomName||"غرفة",u);
 
   }catch(e){
@@ -468,10 +861,14 @@ async function joinRoom(){
 // التسجيل
 $("register").onclick=async()=>{
   try{
-    if(!$("nick").value.trim())throw Error("اكتب الاسم الظاهر أولاً");
+    if(!$("nick").value.trim()){
+      throw Error("اكتب الاسم الظاهر أولاً");
+    }
 
     const r=await createUserWithEmailAndPassword(
-      auth,$("email").value.trim(),$("pass").value
+      auth,
+      $("email").value.trim(),
+      $("pass").value
     );
 
     await profile(r.user,$("nick").value);
@@ -486,7 +883,9 @@ $("register").onclick=async()=>{
 $("login").onclick=async()=>{
   try{
     const r=await signInWithEmailAndPassword(
-      auth,$("email").value.trim(),$("pass").value
+      auth,
+      $("email").value.trim(),
+      $("pass").value
     );
 
     await profile(r.user,$("nick").value);
@@ -497,12 +896,15 @@ $("login").onclick=async()=>{
   }
 };
 
-// زائر
+// الدخول كزائر
 $("guest").onclick=async()=>{
   try{
-    if(!$("nick").value.trim())throw Error("اكتب اسماً مستعاراً أولاً");
+    if(!$("nick").value.trim()){
+      throw Error("اكتب اسماً مستعاراً أولاً");
+    }
 
     const r=await signInAnonymously(auth);
+
     await profile(r.user,$("nick").value);
     msg("authMsg","");
 
@@ -518,11 +920,13 @@ $("logout").onclick=async()=>{
 
     if(u){
       await setDoc(doc(db,"users",u.uid),{
-        status:"offline",updatedAt:serverTimestamp()
+        status:"offline",
+        updatedAt:serverTimestamp()
       },{merge:true});
     }
 
     if(heartbeat)clearInterval(heartbeat);
+
     await signOut(auth);
 
   }catch(e){
@@ -536,7 +940,41 @@ $("send").onsubmit=async e=>{
 
   const t=$("message").value.trim();
   const u=auth.currentUser;
+
   if(!t||!u)return;
+
+  if(currentRoom==="general"){
+    try{
+      blockedFromGeneral=await checkGeneralBlock(u.uid);
+
+      if(blockedFromGeneral){
+        msg("chatMsg","أنت ممنوع من الكتابة في الغرفة العامة.");
+        return;
+      }
+
+      const muteSnap=await getDoc(doc(db,"mutes",u.uid));
+
+      if(muteSnap.exists()){
+        const mute=muteSnap.data();
+
+        if(
+          mute.expiresAt?.toDate &&
+          mute.expiresAt.toDate().getTime()>Date.now()
+        ){
+          const remaining=Math.ceil(
+            (mute.expiresAt.toDate().getTime()-Date.now())/60000
+          );
+
+          msg("chatMsg","أنت مكتوم حالياً. الوقت المتبقي تقريباً "+remaining+" دقيقة.");
+          return;
+        }
+      }
+
+    }catch(x){
+      msg("chatMsg","تعذر التحقق من الكتم: "+err(x));
+      return;
+    }
+  }
 
   $("message").value="";
 
@@ -568,6 +1006,8 @@ $("joinRoom").onclick=joinRoom;
 onAuthStateChanged(auth,async u=>{
   if(!u){
     isOwner=false;
+    myRole="member";
+    blockedFromGeneral=false;
 
     if(stopMessages)stopMessages();
     if(stopRooms)stopRooms();
@@ -577,12 +1017,26 @@ onAuthStateChanged(auth,async u=>{
     $("chat").classList.add("hidden");
     $("auth").classList.remove("hidden");
     $("profileModal").classList.add("hidden");
+
     return;
   }
 
   try{
-    if(!nick)await profile(u,u.displayName);
-    await checkOwner(u);
+    await loadMyRole(u);
+
+    const banned=await checkFullBan(u.uid);
+
+    if(banned){
+      msg("authMsg","هذا الحساب محظور من استخدام الشات.");
+      await signOut(auth);
+      return;
+    }
+
+    if(!nick){
+      await profile(u,u.displayName);
+    }
+
+    blockedFromGeneral=await checkGeneralBlock(u.uid);
 
     $("auth").classList.add("hidden");
     $("chat").classList.remove("hidden");
@@ -591,6 +1045,14 @@ onAuthStateChanged(auth,async u=>{
       $("who").textContent="👑 OWNER | "+(nick||u.displayName||"AHMED");
       $("who").style.color="#D4AF37";
       $("who").style.fontWeight="bold";
+    }else if(myRole==="admin"){
+      $("who").textContent="🛡️ ADMIN | "+(nick||u.displayName||"");
+      $("who").style.color="#e6c36a";
+      $("who").style.fontWeight="bold";
+    }else if(myRole==="moderator"){
+      $("who").textContent="🔰 MODERATOR | "+(nick||u.displayName||"");
+      $("who").style.color="#8fc7e8";
+      $("who").style.fontWeight="bold";
     }else{
       $("who").textContent=nick||u.displayName||"زائر";
       $("who").style.color="";
@@ -598,11 +1060,16 @@ onAuthStateChanged(auth,async u=>{
     }
 
     setPresence();
+
     watchMessages(u);
     watchRooms(u);
     watchUsers(u);
 
+    if(blockedFromGeneral){
+      msg("chatMsg","أنت ممنوع من دخول الغرفة العامة، ويمكنك استخدام الغرف المسموح بها.");
+    }
+
   }catch(e){
-    msg("chatMsg",err(e));
+    msg("authMsg","تعذر تشغيل الحساب: "+err(e));
   }
 });
